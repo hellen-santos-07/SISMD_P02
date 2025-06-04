@@ -1,48 +1,81 @@
 -module(sensor).
--export([start/1, add_remote/1, send_msg/4, stop_sensor/1]).
+-export([start/1, start/2, start/3, send_msg/1, stop_sensor/1, add_neighbors/2]).
 -import(rand, [uniform/1]).
 
-start(Sensor) ->
-    register(Sensor, spawn(fun() ->
+start(Name) ->
+    start(Name, []).
+
+start(Name, Neighbors) ->
+    start(Name, Neighbors, false).
+
+start(Name, Neighbors, UseRelay) ->
+    register(Name, spawn(fun() ->
         MyNode = node(),
         [_, Host] = string:split(atom_to_list(MyNode), "@"),
         ServerNode = list_to_atom("server1@" ++ Host),
-        add_remote(ServerNode),
-        loop()
-                           end)).
+        net_adm:ping(ServerNode),
+        loop(Name, ServerNode, Neighbors, UseRelay)
+                         end)).
 
-add_remote(RemoteMachine) ->
-    net_adm:ping(RemoteMachine).
+send_msg(SensorName) ->
+    SensorName ! send.
 
-send_msg(Sensor, Server, RemoteMachine, Message) ->
-    Sensor ! {send, Server, RemoteMachine, Message}.
+stop_sensor(SensorName) ->
+    SensorName ! stop.
 
-stop_sensor(Sensor) ->
-    Sensor ! {stop_sensor}.
+add_neighbors(SensorName, NewNeighbors) ->
+    SensorName ! {update_neighbors, NewNeighbors}.
 
-generate_data() ->
-    %% Random example: temperature (°C) and humidity (%)
-    Temp = rand:uniform(15) + 15,  % 15–30°C
-    Hum = rand:uniform(50) + 30,  % 30–80%
-    #{temperature => Temp, humidity => Hum}.
-
-
-loop() ->
-    SensorName = self(),
-    send_data(),
+loop(Name, ServerNode, Neighbors, UseRelay) ->
     receive
-        {stop_sensor} ->
-            io:format("Sensor exiting...~n")
-    after 5000 ->  % wait 5 seconds, then send again
-        loop()
+        send ->
+            Msg = generate_data(Name),
+            try_send(Name, ServerNode, Neighbors, Msg, UseRelay),
+            loop(Name, ServerNode, Neighbors, UseRelay);
+
+        {relay, From, Msg} ->
+            io:format("~p: Forwarding data from ~p to server~n", [Name, From]),
+            try_send(Name, ServerNode, Neighbors, Msg, UseRelay),
+            loop(Name, ServerNode, Neighbors, UseRelay);
+
+        {update_neighbors, NewNeighbors} ->
+            io:format("~p: Neighbors updated to ~p~n", [Name, NewNeighbors]),
+            loop(Name, ServerNode, NewNeighbors, UseRelay);
+
+        stop ->
+            io:format("~p: Sensor stopping~n", [Name])
     end.
 
-send_data() ->
-    MyNode = node(),
-    [_, Host] = string:split(atom_to_list(MyNode), "@"),
-    ServerNode = list_to_atom("server1@" ++ Host),
+try_send(Name, ServerNode, Neighbors, Msg, true) ->
+    io:format("~p: [UseRelay=true] Skipping server. Trying neighbors...~n", [Name]),
+    try_relay(Name, Msg, Neighbors);
+
+try_send(Name, ServerNode, Neighbors, Msg, false) ->
+    case catch {central, ServerNode} ! {self(), Msg} of
+        {'EXIT', _} ->
+            io:format("~p: Could not send to server. Trying neighbors...~n", [Name]),
+            try_relay(Name, Msg, Neighbors);
+        _ -> ok
+    end.
+
+try_relay(Name, Msg, []) ->
+    io:format("No neighbors to relay the message.~n");
+
+try_relay(Name, Msg, [{NeighborName, NeighborNode} | Rest]) ->
+    io:format("~p: Trying neighbor ~p on node ~p...~n", [Name, NeighborName, NeighborNode]),
+    case catch {NeighborName, NeighborNode} ! {relay, Name, Msg} of
+        {'EXIT', _} ->
+            io:format("~p: Failed to contact ~p. Trying next neighbor...~n", [Name, NeighborName]),
+            try_relay(Name, Msg, Rest);
+        _ ->
+            ok
+    end;
+
+try_relay(Name, Msg, [Invalid | Rest]) ->
+    io:format("~p: Invalid neighbor format: ~p~n", [Name, Invalid]),
+    try_relay(Name, Msg, Rest).
+
+generate_data(Name) ->
     Timestamp = calendar:local_time(),
-    Data = generate_data(),
-    {registered_name, SensorName} = process_info(self(), registered_name),
-    Message = {sensor_data, SensorName, Timestamp, Data},
-    {central, ServerNode} ! {self(), Message}.
+    Data = #{temperature => rand:uniform(30), humidity => rand:uniform(100)},
+    {sensor_data, Name, Timestamp, Data}.

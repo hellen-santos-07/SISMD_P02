@@ -21,4 +21,3 @@ echo Launching sensors
 call "%SCRIPTS_DIR%\sensor_launch_cmds.bat"
 
 echo Done.
-pause
