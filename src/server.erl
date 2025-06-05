@@ -1,28 +1,23 @@
 -module(server).
--export([start/1]).
+-export([start/1, loop/1]).
 
-start(ServerName) ->
-    register(ServerName, spawn(fun() ->
-        ets:new(sensor_data, [named_table, public, set]),
-        loop()
-                               end)).
+start(Name) ->
+    register(Name, spawn(fun() ->
+        net_kernel:monitor_nodes(true),
+        loop(Name)
+                         end)).
 
-loop() ->
+loop(Name) ->
     receive
         {From, {sensor_data, SensorName, Timestamp, Data}} ->
-            Formatted = lists:flatten(format_time(Timestamp)),
-            io:format("[~s] ~p reported: ~p~n", [Formatted, SensorName, Data]),
-            ets:insert(sensor_data, {SensorName, {Timestamp, Data}}),
-            loop();
+            io:format("~p: Received data from ~p at ~p: ~p~n", [Name, SensorName, Timestamp, Data]),
+            loop(Name);
 
-        {From, stop} ->
-            io:format("Received stop signal from ~p~n", [From]),
-            From ! {self(), server_disconnect};
+        {node_down, Node} ->
+            io:format("~p: Detected node down: ~p~n", [Name, Node]),
+            loop(Name);
 
-        Unknown ->
-            io:format("Received unknown message: ~p~n", [Unknown]),
-            loop()
+        Other ->
+            io:format("~p: Unexpected message: ~p~n", [Name, Other]),
+            loop(Name)
     end.
-
-format_time({{Y, M, D}, {H, Min, S}}) ->
-    io_lib:format("~4..0B-~2..0B-~2..0B ~2..0B:~2..0B:~2..0B", [Y, M, D, H, Min, S]).

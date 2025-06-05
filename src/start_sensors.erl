@@ -32,7 +32,7 @@ commands(N) when is_integer(N), N > 0 ->
     ),
 
     FullCmd = io_lib:format(
-      "start cmd /k erl -pa ebin -sname ~s -setcookie mycookie -eval \"~s\"",
+      "start cmd /k erl -pa ebin -sname ~s -setcookie bolacha -eval \"~s\"",
       [Name, lists:flatten(EvalStr)]
     ),
     lists:flatten(FullCmd)

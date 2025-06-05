@@ -10,7 +10,7 @@ echo Compiling all modules
 erl -noshell -pa ebin -eval "compile_all:all(), halt()."
 
 echo Starting server node
-start cmd /k erl -pa ebin -sname server1 -setcookie mycookie -eval "server:start(central)."
+start cmd /k erl -pa ebin -sname server1 -setcookie bolacha -eval "server:start(central)."
 
 timeout /t 2 >nul
 

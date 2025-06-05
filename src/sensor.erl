@@ -14,6 +14,8 @@ start(Name, Neighbors, UseRelay) ->
         [_, Host] = string:split(atom_to_list(MyNode), "@"),
         ServerNode = list_to_atom("server1@" ++ Host),
         net_adm:ping(ServerNode),
+        net_kernel:monitor_nodes(true),
+        self() ! tick,
         loop(Name, ServerNode, Neighbors, UseRelay)
                          end)).
 
@@ -28,6 +30,11 @@ add_neighbors(SensorName, NewNeighbors) ->
 
 loop(Name, ServerNode, Neighbors, UseRelay) ->
     receive
+        tick ->
+            send_msg(Name),
+            erlang:send_after(10000, self(), tick),
+            loop(Name, ServerNode, Neighbors, UseRelay);
+
         send ->
             Msg = generate_data(Name),
             try_send(Name, ServerNode, Neighbors, Msg, UseRelay),
@@ -42,37 +49,73 @@ loop(Name, ServerNode, Neighbors, UseRelay) ->
             io:format("~p: Neighbors updated to ~p~n", [Name, NewNeighbors]),
             loop(Name, ServerNode, NewNeighbors, UseRelay);
 
+        {node_down, DownSensor} ->
+            Filtered = lists:filter(
+                fun ({DownSensorName, _}) -> DownSensorName =/= DownSensor end,
+                Neighbors),
+            io:format("~p: Notified that ~p went down. Updated neighbors: ~p~n", [Name, DownSensor, Filtered]),
+            loop(Name, ServerNode, Filtered, UseRelay);
+
+        {nodedown, DownNode} ->
+            io:format("~p: Detected node down: ~p~n", [Name, DownNode]),
+
+            {DeadSensors, Remaining} = lists:partition(
+                fun ({_, Node}) -> Node =:= DownNode end,
+                Neighbors),
+
+            lists:foreach(
+                fun ({DeadSensorName, _}) ->
+                    lists:foreach(
+                        fun ({NName, NNode}) ->
+                            case rpc:call(NNode, erlang, whereis, [NName]) of
+                                undefined -> ok;
+                                Pid -> Pid ! {node_down, DeadSensorName}
+                            end
+                        end, Remaining)
+                end, DeadSensors),
+
+            io:format("~p: Removed ~p. Remaining neighbors: ~p~n", [Name, DeadSensors, Remaining]),
+            loop(Name, ServerNode, Remaining, UseRelay);
+
         stop ->
             io:format("~p: Sensor stopping~n", [Name])
     end.
 
+
 try_send(Name, ServerNode, Neighbors, Msg, true) ->
-    io:format("~p: [UseRelay=true] Skipping server. Trying neighbors...~n", [Name]),
+    io:format("~p: [UseRelay=true] Skipping server. Trying neighbors!~n", [Name]),
     try_relay(Name, Msg, Neighbors);
 
 try_send(Name, ServerNode, Neighbors, Msg, false) ->
     case catch {central, ServerNode} ! {self(), Msg} of
         {'EXIT', _} ->
-            io:format("~p: Could not send to server. Trying neighbors...~n", [Name]),
+            io:format("~p: Could not send to server. Trying neighbors!~n", [Name]),
             try_relay(Name, Msg, Neighbors);
         _ -> ok
     end.
 
 try_relay(Name, Msg, []) ->
-    io:format("No neighbors to relay the message.~n");
+    io:format("~p: No more neighbours to try :( .~n", [Name]);
 
 try_relay(Name, Msg, [{NeighborName, NeighborNode} | Rest]) ->
-    io:format("~p: Trying neighbor ~p on node ~p...~n", [Name, NeighborName, NeighborNode]),
-    case catch {NeighborName, NeighborNode} ! {relay, Name, Msg} of
-        {'EXIT', _} ->
-            io:format("~p: Failed to contact ~p. Trying next neighbor...~n", [Name, NeighborName]),
+    io:format("~p: Trying neighbour ~p on node ~p!~n", [Name, NeighborName, NeighborNode]),
+    case net_adm:ping(NeighborNode) of
+        pang ->
+            io:format("~p: Neighbor node ~p is unreachable. Trying the next one!~n", [Name, NeighborNode]),
             try_relay(Name, Msg, Rest);
-        _ ->
-            ok
+        pong ->
+            case rpc:call(NeighborNode, erlang, whereis, [NeighborName]) of
+                undefined ->
+                    io:format("~p: Neighbour process ~p not found on ~p. Trying the next one!~n", [Name, NeighborName, NeighborNode]),
+                    try_relay(Name, Msg, Rest);
+                Pid when is_pid(Pid) ->
+                    Pid ! {relay, Name, Msg},
+                    io:format("~p: Successfully relayed through ~p~n", [Name, NeighborName])
+            end
     end;
 
 try_relay(Name, Msg, [Invalid | Rest]) ->
-    io:format("~p: Invalid neighbor format: ~p~n", [Name, Invalid]),
+    io:format("~p: Invalid neighbour format: ~p~n", [Name, Invalid]),
     try_relay(Name, Msg, Rest).
 
 generate_data(Name) ->
